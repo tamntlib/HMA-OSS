@@ -44,6 +44,14 @@ object PackageManagerUtils {
         }
     }
 
+    fun isLauncherPackage(packageName: String, userId: Int): Boolean {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            setPackage(packageName)
+        }
+        return !queryIntentActivitiesAsUser(intent, userId).isNullOrEmpty()
+    }
+
     // I am lazy to call IPackageManager
     @Suppress("UNCHECKED_CAST")
     private fun queryIntentActivitiesAsUser(intent: Intent, userId: Int) = callMethodWithTypes(

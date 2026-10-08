@@ -58,6 +58,7 @@ import org.frknkrc44.hma_oss.zygote.util.Logcat.logWithLevel
 import org.frknkrc44.hma_oss.zygote.util.PackageManagerUtils.findApp
 import org.frknkrc44.hma_oss.zygote.util.PackageManagerUtils.getLaunchIntentForPackageAsUser
 import org.frknkrc44.hma_oss.zygote.util.PackageManagerUtils.isConflictingModuleInstalled
+import org.frknkrc44.hma_oss.zygote.util.PackageManagerUtils.isLauncherPackage
 import org.frknkrc44.hma_oss.zygote.util.ServiceUtils.ensureFileIsRW
 import org.frknkrc44.hma_oss.zygote.util.ServiceUtils.findAndVerifyAppSignature
 import org.frknkrc44.hma_oss.zygote.util.UserManagerUtils
@@ -392,11 +393,35 @@ class HMAService(val pms: IPackageManager, val pmn: Any?) : IHMAService.Stub() {
     fun isAppInGMSIgnoredPackages(caller: String, query: String) =
         (caller in Constants.gmsPackages) && RiskyPackageUtils.instance.appHasGMSConnection(query)
 
+    fun shouldHideManagerByDefault(caller: String?, query: String?, userId: Int): Boolean {
+        if (caller == null || query != BuildConfig.APP_PACKAGE_NAME) return false
+        if (caller in Constants.packagesShouldNotHide) return false
+        when (caller) {
+            BuildConfig.APP_PACKAGE_NAME,
+            "com.android.settings",
+            "com.android.packageinstaller",
+            "com.google.android.packageinstaller",
+            "com.samsung.android.packageinstaller" -> return false
+        }
+
+        // Resolve HOME candidates per user, without caching launcher changes.
+        // If the framework lookup fails, keep the manager accessible.
+        return binderLocalScope {
+            try {
+                !isLauncherPackage(caller, userId)
+            } catch (cause: Throwable) {
+                logW(TAG, cause) { "Cannot resolve launchers for user $userId" }
+                false
+            }
+        }
+    }
+
     fun shouldHide(caller: String?, query: String?, userId: Int): Boolean {
         if (caller == null || query == null) return false
         if (caller == BuildConfig.APP_PACKAGE_NAME) return false
         if (caller in Constants.packagesShouldNotHide || query in Constants.packagesShouldNotHide) return false
         if (caller == query) return false
+        if (shouldHideManagerByDefault(caller, query, userId)) return true
         val appConfig = config.scope[caller] ?: return false
 
         if (config.webViewProtection) {
@@ -445,6 +470,7 @@ class HMAService(val pms: IPackageManager, val pmn: Any?) : IHMAService.Stub() {
         config.scope[caller]?.restrictedZygotePermissions
 
     fun shouldHideActivityLaunch(caller: String?, query: String?, userId: Int): Boolean {
+        if (shouldHideManagerByDefault(caller, query, userId)) return true
         val appConfig = config.scope[caller]
         if (appConfig != null && shouldHide(caller, query, userId)) {
             return if (appConfig.invertActivityLaunchProtection) {

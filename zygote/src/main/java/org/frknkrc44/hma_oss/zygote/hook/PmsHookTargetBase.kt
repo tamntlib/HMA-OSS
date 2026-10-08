@@ -3,6 +3,7 @@ package org.frknkrc44.hma_oss.zygote.hook
 import android.content.pm.IPackageManager
 import icu.nullptr.hidemyapplist.common.Constants
 import icu.nullptr.hidemyapplist.common.Utils.getUserFromCallingUid
+import org.frknkrc44.hma_oss.common.BuildConfig
 import org.frknkrc44.hma_oss.zygote.service.ReturnValue
 import org.frknkrc44.hma_oss.zygote.util.Logcat.logD
 import org.frknkrc44.hma_oss.zygote.util.Logcat.logI
@@ -29,7 +30,9 @@ abstract class PmsHookTargetBase : IFrameworkHook {
 
         val targetApp = findTargetApp() ?: return
         logV(TAG) { "@$methodName incoming query: $callingUid => $targetApp" }
-        if (dataHolder.shouldHideFromUid(callingUid, targetApp) == true) {
+        // Launcher roles can change while the service is running.
+        if (targetApp != BuildConfig.APP_PACKAGE_NAME &&
+            dataHolder.shouldHideFromUid(callingUid, targetApp) == true) {
             returnValue.result = valueForHiding
             service.increasePMFilterCount(callingUid)
             logD(TAG) { "@$methodName caller cache: $callingUid, target: $targetApp" }
@@ -43,7 +46,9 @@ abstract class PmsHookTargetBase : IFrameworkHook {
             returnValue.result = valueForHiding
             val last = lastFilteredApp.getAndSet(caller)
             if (last != caller) logI(TAG) { "@$methodName: query from $caller" }
-            dataHolder.putShouldHideUidCache(callingUid, caller, targetApp)
+            if (targetApp != BuildConfig.APP_PACKAGE_NAME) {
+                dataHolder.putShouldHideUidCache(callingUid, caller, targetApp)
+            }
             service.increasePMFilterCount(caller)
         }
     }

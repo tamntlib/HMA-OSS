@@ -8,6 +8,7 @@ import icu.nullptr.hidemyapplist.common.CollectionUtils.firstWithType
 import icu.nullptr.hidemyapplist.common.Constants
 import icu.nullptr.hidemyapplist.common.Utils.getPackageName
 import icu.nullptr.hidemyapplist.common.Utils.getUserFromCallingUid
+import org.frknkrc44.hma_oss.common.BuildConfig
 import org.frknkrc44.hma_oss.zygote.util.Logcat.logD
 import org.frknkrc44.hma_oss.zygote.util.Logcat.logI
 import org.frknkrc44.hma_oss.zygote.util.Logcat.logV
@@ -74,17 +75,25 @@ class ActivityHook : IFrameworkHook {
                 val callingUserId = getUserFromCallingUid(callingUid)
                 val callingApps = getCallingApps(pms, callingUid)
                 val caller = callingApps.firstOrNull { service.isHookEnabled(it) }
-                if (caller != null) {
+                val managerCaller = if (list.any { it.getPackageName() == BuildConfig.APP_PACKAGE_NAME }) {
+                    callingApps.firstOrNull {
+                        service.shouldHideActivityLaunch(it, BuildConfig.APP_PACKAGE_NAME, callingUserId)
+                    }
+                } else null
+                if (caller != null || managerCaller != null) {
                     logV(TAG) { "@$methodName: $caller requested a resolve info" }
 
+                    var managerRemoved = 0
                     val filteredList = list.filter { resolveInfo ->
                         val targetApp = resolveInfo.getPackageName()
+                        val targetCaller = if (targetApp == BuildConfig.APP_PACKAGE_NAME) managerCaller else caller
 
-                        logV(TAG) { "@$methodName: Checking $targetApp for $caller" }
+                        logV(TAG) { "@$methodName: Checking $targetApp for $targetCaller" }
 
-                        (!service.shouldHideActivityLaunch(caller, targetApp, callingUserId)).apply {
+                        (!service.shouldHideActivityLaunch(targetCaller, targetApp, callingUserId)).apply {
                             if (!this) {
-                                logD(TAG) { "@$methodName: insecure query from $caller, target: $targetApp" }
+                                logD(TAG) { "@$methodName: insecure query from $targetCaller, target: $targetApp" }
+                                if (targetCaller != caller) managerRemoved++
                             }
                         }
                     }
@@ -99,7 +108,8 @@ class ActivityHook : IFrameworkHook {
                             runCatching { it.retainAll(filteredList.toSet()) }
                         }
 
-                        service.increasePMFilterCount(caller, removed)
+                        service.increasePMFilterCount(caller, removed - managerRemoved)
+                        service.increasePMFilterCount(managerCaller, managerRemoved)
                     }
                 }
             }
