@@ -62,6 +62,39 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle') }}
           restore-keys: ${{ runner.os }}-gradle-
 
+      - name: Set manager package
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          package = "io.github.tamntlib.hma_oss"
+          old_package = "org.frknkrc44.hma_oss"
+          changes = {
+              "app/build.gradle.kts": [
+                  ('    defaultConfig {\n', f'    defaultConfig {{\n        applicationId = "{package}"\n'),
+              ],
+              "common/build.gradle.kts": [
+                  ('\\"$appPackageName\\"', f'\\"{package}\\"'),
+              ],
+              "app/src/main/AndroidManifest.xml": [
+                  ('android:name=".MainActivityLauncher', 'android:name="${applicationId}.MainActivityLauncher'),
+              ],
+              "zygote/src/main/assets/action.sh": [(f'PKG={old_package}', f'PKG={package}')],
+              "zygote/src/main/assets/customize.d/35-install-manager-app.sh": [(old_package, package)],
+              "zygote/src/main/java/org/frknkrc44/hma_oss/zygote/util/ServiceUtils.kt": [
+                  ('\n                    BuildConfig.APP_PACKAGE_NAME,', f'\n                    "{old_package}",'),
+              ],
+          }
+          for filename, replacements in changes.items():
+              path = Path(filename)
+              source = path.read_text()
+              for old, new in replacements:
+                  if old not in source:
+                      raise SystemExit(f"Package replacement target missing: {filename}")
+                  source = source.replace(old, new)
+              path.write_text(source)
+          PY
+
       - name: Gradle prebuild
         run: |
           ./gradlew prebuild
@@ -119,7 +152,7 @@ jobs:
           tag_name: oss-${{ steps.buildModule.outputs.ossNum }}
 
       - name: Post to channel
-        if: ${{ github.event_name != 'pull_request' && success() && github.ref == 'refs/heads/master' }}
+        if: ${{ github.repository == 'frknkrc44/HMA-OSS' && github.event_name != 'pull_request' && success() && github.ref == 'refs/heads/master' }}
         env:
           CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL }}
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
