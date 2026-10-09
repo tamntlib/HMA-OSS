@@ -1,0 +1,66 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    if: github.repository == 'tamntlib/HMA-OSS' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.sync.outputs.build }}
+      ref: ${{ steps.sync.outputs.ref }}
+      tag: ${{ steps.sync.outputs.tag }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Sync latest upstream release
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api repos/frknkrc44/HMA-OSS/releases/latest --jq .tag_name)
+          [[ "$tag" =~ ^oss-[0-9]+$ ]]
+          git fetch --no-tags https://github.com/frknkrc44/HMA-OSS.git "+refs/tags/$tag:refs/remotes/upstream/release"
+          upstream=$(git rev-parse refs/remotes/upstream/release^{commit})
+          fork=$(git rev-parse HEAD)
+          git read-tree --reset -u "$upstream"
+          git restore --source "$fork" --staged --worktree .github/workflows
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m "Sync upstream $tag"
+            git push origin HEAD:master
+            test "$(git ls-remote origin refs/heads/master | cut -f1)" = "$(git rev-parse HEAD)"
+          fi
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name as $tag | [.assets[] | select(.state == "uploaded") | .name] as $uploaded | select((["HMA-OSS-ZYGISK-\($tag)-release.zip", "HMA-OSS-ZYGISK-\($tag)-debug.zip", "translators.json", "update.json", "changelog.md"] - $uploaded | length) == 0) | .tag_name')
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream" >> "$GITHUB_OUTPUT"
+          if printf '%s\n' "$releases" | grep -Fxq "$tag"; then
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    uses: ./.github/workflows/main.yml
+    with:
+      ref: ${{ needs.sync.outputs.ref }}
+      upstream_tag: ${{ needs.sync.outputs.tag }}
+      upstream_sha: ${{ needs.sync.outputs.upstream_sha }}
+    secrets: inherit

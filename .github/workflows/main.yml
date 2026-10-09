@@ -13,6 +13,15 @@ on:
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+      upstream_tag:
+        type: string
+      upstream_sha:
+        type: string
+
 jobs:
   build:
     name: Build on ${{ matrix.os }}
@@ -29,6 +38,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref || github.sha }}
           submodules: 'recursive'
           fetch-depth: 0
 
@@ -62,6 +72,21 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle') }}
           restore-keys: ${{ runner.os }}-gradle-
 
+      - name: Use upstream version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        run: |
+          if [ -z "$UPSTREAM_TAG" ]; then
+            UPSTREAM_TAG=$(gh api repos/frknkrc44/HMA-OSS/releases/latest --jq .tag_name)
+          fi
+          [[ "$UPSTREAM_TAG" =~ ^oss-[0-9]+$ ]]
+          git fetch --no-tags https://github.com/frknkrc44/HMA-OSS.git "+refs/tags/$UPSTREAM_TAG:refs/remotes/upstream/release"
+          upstream=$(git rev-parse refs/remotes/upstream/release^{commit})
+          [[ -z "$UPSTREAM_SHA" || "$upstream" == "$UPSTREAM_SHA" ]]
+          git update-ref refs/remotes/origin/master "$upstream"
+
       - name: Set manager package
         run: |
           python3 - <<'PY'
@@ -83,6 +108,13 @@ jobs:
               "zygote/src/main/assets/customize.d/35-install-manager-app.sh": [(old_package, package)],
               "zygote/src/main/java/org/frknkrc44/hma_oss/zygote/util/ServiceUtils.kt": [
                   ('\n                    BuildConfig.APP_PACKAGE_NAME,', f'\n                    "{old_package}",'),
+              ],
+              "app/src/main/java/icu/nullptr/hidemyapplist/data/AppConstants.kt": [
+                  ('https://api.github.com/repos/frknkrc44/HMA-OSS/releases/latest', 'https://api.github.com/repos/tamntlib/HMA-OSS/releases/latest'),
+              ],
+              "zygote/build.gradle.kts": [
+                  ('    author = "frknkrc44"', '    author = "tamntlib"'),
+                  ('https://furkank.net/hma_oss_update_checker.json', 'https://github.com/tamntlib/HMA-OSS/releases/latest/download/update.json'),
               ],
           }
           for filename, replacements in changes.items():
@@ -119,6 +151,31 @@ jobs:
           echo "debugFile=$(ls zygote/build/outputs/magisk/debug/*.zip)" >> $GITHUB_OUTPUT
           echo "ossNum=$(ls app/build/outputs/apk/debug/*.apk | awk -F '(/|.apk)' '{print $6}' | cut -f4 -d'-')" >> $GITHUB_OUTPUT
 
+      - name: Write module update feed
+        env:
+          RELEASE_FILE: ${{ steps.buildModule.outputs.releaseFile }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import zipfile
+
+          archive = Path(os.environ["RELEASE_FILE"])
+          with zipfile.ZipFile(archive) as module:
+              props = dict(line.split("=", 1) for line in module.read("module.prop").decode().splitlines() if "=" in line)
+          release = f"https://github.com/{os.environ['REPOSITORY']}/releases/download/{props['version']}"
+          Path("update.json").write_text(json.dumps({
+              "version": props["version"],
+              "versionCode": int(props["versionCode"]),
+              "zipUrl": f"{release}/{archive.name}",
+              "changelog": f"{release}/changelog.md",
+          }, indent=2) + "\n")
+          Path("changelog.md").write_text(subprocess.check_output(["git", "log", "-1", "--format=%B"], text=True))
+          PY
+
       - name: Upload release
         uses: actions/upload-artifact@v7
         with:
@@ -144,12 +201,15 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: oss-${{ steps.buildModule.outputs.ossNum }}
-          body: ${{ github.event.head_commit.message }}
+          body_path: changelog.md
           files: |
             ${{ steps.buildModule.outputs.releaseFile }}
             ${{ steps.buildModule.outputs.debugFile }}
             app/src/main/assets/translators.json
+            update.json
+            changelog.md
           tag_name: oss-${{ steps.buildModule.outputs.ossNum }}
+          target_commitish: ${{ inputs.ref || github.sha }}
 
       - name: Post to channel
         if: ${{ github.repository == 'frknkrc44/HMA-OSS' && github.event_name != 'pull_request' && success() && github.ref == 'refs/heads/master' }}
