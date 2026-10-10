@@ -1,0 +1,49 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    if: github.repository == 'tamntlib/HMA-OSS' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Sync latest upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api repos/frknkrc44/HMA-OSS/releases/latest --jq .tag_name)
+          [[ "$tag" =~ ^oss-[0-9]+$ ]]
+          git fetch --no-tags https://github.com/frknkrc44/HMA-OSS.git "+refs/tags/$tag:refs/remotes/upstream/release"
+          upstream=$(git rev-parse refs/remotes/upstream/release^{commit})
+          fork=$(git rev-parse HEAD)
+          git read-tree --reset -u "$upstream"
+          git restore --source "$fork" --staged --worktree .github/workflows
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m "Sync upstream $tag"
+            git push origin HEAD:master
+            test "$(git ls-remote origin refs/heads/master | cut -f1)" = "$(git rev-parse HEAD)"
+          fi
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name as $tag | [.assets[] | select(.state == "uploaded") | .name] as $uploaded | select((["HMA-OSS-ZYGISK-\($tag)-release.zip", "HMA-OSS-ZYGISK-\($tag)-debug.zip", "translators.json", "update.json", "changelog.md"] - $uploaded | length) == 0) | .tag_name')
+          if ! printf '%s\n' "$releases" | grep -Fxq "$tag"; then
+            gh workflow run main.yml --repo "$GITHUB_REPOSITORY" --ref master \
+              -f ref="$(git rev-parse HEAD)" \
+              -f upstream_tag="$tag" \
+              -f upstream_sha="$upstream"
+          fi
