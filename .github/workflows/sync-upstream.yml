@@ -1,0 +1,30 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync latest upstream release
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          UPSTREAM_REPO=$(gh api "repos/$GITHUB_REPOSITORY" --jq .parent.full_name)
+          tag=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          upstream=$(gh api "repos/$UPSTREAM_REPO/commits/$(jq -rn --arg tag "$tag" '$tag | @uri')" --jq .sha)
+          response=$(gh api --include --method POST "repos/$GITHUB_REPOSITORY/merges" \
+            -f base="$GITHUB_REF_NAME" \
+            -f head="$upstream")
+          read -r _ status _ <<< "$response"
+          if [ "$status" = 201 ]; then
+            gh workflow run main.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+              -f upstream_tag="$tag"
+          fi
