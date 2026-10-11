@@ -12,6 +12,9 @@ on:
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      upstream_tag:
+        type: string
 
 jobs:
   build:
@@ -62,6 +65,62 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle') }}
           restore-keys: ${{ runner.os }}-gradle-
 
+      - name: Use upstream version
+        id: upstreamVersion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          UPSTREAM_REPO=$(gh api "repos/$GITHUB_REPOSITORY" --jq .parent.full_name)
+          if [ -z "$UPSTREAM_TAG" ]; then
+            UPSTREAM_TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          fi
+          gh release download "$UPSTREAM_TAG" --repo "$UPSTREAM_REPO" \
+            --pattern '*-release.zip' --dir "$RUNNER_TEMP/upstream-release"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import zipfile
+
+          archive = next((Path(os.environ["RUNNER_TEMP"]) / "upstream-release").glob("*-release.zip"))
+          with zipfile.ZipFile(archive) as module:
+              props = dict(line.split("=", 1) for line in module.read("module.prop").decode().splitlines() if "=" in line)
+          path = Path("build.gradle.kts")
+          source = path.read_text()
+
+          source = re.sub(r'^val appVerCode by extra\(.*\).*$', f'val appVerCode by extra({int(props["versionCode"])})', source, flags=re.MULTILINE)
+          version = json.dumps(props["version"], ensure_ascii=False).replace("$", "\\$")
+          source = source.replace('val appVerName by extra(gitVersionName)', f'val appVerName by extra({version})')
+          path.write_text(source)
+          PY
+          echo "tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Replace upstream owner with repository owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          UPSTREAM_OWNER=$(gh api "repos/$GITHUB_REPOSITORY" --jq .parent.owner.login)
+          git ls-files --recurse-submodules -z |
+            while IFS= read -r -d '' path; do
+              if [ -f "$path" ] && [ ! -L "$path" ]; then
+                sed -i "s/$UPSTREAM_OWNER/$GITHUB_REPOSITORY_OWNER/g" "$path"
+              fi
+              while [ "$path" != . ]; do
+                printf '%s\0' "$path"
+                path=$(dirname -- "$path")
+              done
+            done |
+            sort -zru |
+            while IFS= read -r -d '' path; do
+              name=${path##*/}
+              if [[ "$name" == *"$UPSTREAM_OWNER"* ]]; then
+                mv -T -- "$path" "$(dirname -- "$path")/${name//$UPSTREAM_OWNER/$GITHUB_REPOSITORY_OWNER}"
+              fi
+            done
+          sed -i "s|https://furkank.net/hma_oss_update_checker.json|https://github.com/$GITHUB_REPOSITORY/releases/latest/download/update.json|g" zygote/build.gradle.kts
+
       - name: Gradle prebuild
         run: |
           ./gradlew prebuild
@@ -85,6 +144,35 @@ jobs:
           echo "releaseFile=$(ls zygote/build/outputs/magisk/release/*.zip)" >> $GITHUB_OUTPUT
           echo "debugFile=$(ls zygote/build/outputs/magisk/debug/*.zip)" >> $GITHUB_OUTPUT
           echo "ossNum=$(ls app/build/outputs/apk/debug/*.apk | awk -F '(/|.apk)' '{print $6}' | cut -f4 -d'-')" >> $GITHUB_OUTPUT
+
+      - name: Write module update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_FILE: ${{ steps.buildModule.outputs.releaseFile }}
+          REPOSITORY: ${{ github.repository }}
+          UPSTREAM_TAG: ${{ steps.upstreamVersion.outputs.tag }}
+        run: |
+          UPSTREAM_REPO=$(gh api "repos/$GITHUB_REPOSITORY" --jq .parent.full_name)
+          gh api "repos/$UPSTREAM_REPO/releases/tags/$(jq -rn --arg tag "$UPSTREAM_TAG" '$tag | @uri')" \
+            --jq '.body // ""' > changelog.md
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import zipfile
+          from urllib.parse import quote
+
+          archive = Path(os.environ["RELEASE_FILE"])
+          with zipfile.ZipFile(archive) as module:
+              props = dict(line.split("=", 1) for line in module.read("module.prop").decode().splitlines() if "=" in line)
+          release = f"https://github.com/{os.environ['REPOSITORY']}/releases/download/{quote(os.environ['UPSTREAM_TAG'], safe='')}"
+          Path("update.json").write_text(json.dumps({
+              "version": props["version"],
+              "versionCode": int(props["versionCode"]),
+              "zipUrl": f"{release}/{archive.name}",
+              "changelog": f"{release}/changelog.md",
+          }, indent=2) + "\n")
+          PY
 
       - name: Upload release
         uses: actions/upload-artifact@v7
@@ -110,13 +198,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          name: oss-${{ steps.buildModule.outputs.ossNum }}
-          body: ${{ github.event.head_commit.message }}
+          name: ${{ steps.upstreamVersion.outputs.tag }}
+          body_path: changelog.md
           files: |
             ${{ steps.buildModule.outputs.releaseFile }}
             ${{ steps.buildModule.outputs.debugFile }}
             app/src/main/assets/translators.json
-          tag_name: oss-${{ steps.buildModule.outputs.ossNum }}
+            update.json
+            changelog.md
+          tag_name: ${{ steps.upstreamVersion.outputs.tag }}
 
       - name: Post to channel
         if: ${{ github.event_name != 'pull_request' && success() && github.ref == 'refs/heads/master' }}
